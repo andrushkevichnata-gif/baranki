@@ -29,7 +29,7 @@
   }
   #vbook-controls button{
     width:44px; height:44px; border-radius:50%; border:1px solid #c9c9c9;
-    background:#fff; font-size:24px; line-height:1; cursor:pointer; color:#333;
+    background:#fff; font-size:22px; line-height:1; cursor:pointer; color:#333;
   }
   #vbook-controls button:hover{ background:#eef0ea; }
   #vbook-counter{ min-width:80px; text-align:center; font-size:15px; color:#444; }
@@ -48,6 +48,7 @@
     <button id="vbook-prev" aria-label="Назад">&#8249;</button>
     <span id="vbook-counter">1 / 1</span>
     <button id="vbook-next" aria-label="Вперёд">&#8250;</button>
+    <button id="vbook-sound" aria-label="Звук" title="Звук">&#128266;</button>
     <button id="vbook-full" aria-label="Во весь экран" title="Во весь экран">&#x26F6;</button>
   </div>
 </div>
@@ -57,9 +58,77 @@
 <script>
 (function(){
   /* ===== НАСТРОЙКИ ===== */
-  var PDF_FILE     = 'baranki_compressed.pdf';  // имя PDF в репозитории
-  var RENDER_WIDTH = 1600;         // качество страницы (больше = чётче, но медленнее)
+  var PDF_FILE     = 'veter.pdf';  // имя PDF в репозитории
+  var RENDER_WIDTH = 1600;         // качество страницы
+  var SOUND_ON     = true;         // звук включён по умолчанию
+  var VOLUME       = 0.35;         // громкость шелеста (0.1 – тихо, 0.6 – громко)
   /* ===================== */
+
+  /* ---------- ШЕЛЕСТ СТРАНИЦЫ ---------- */
+  var audioCtx = null;
+  var soundOn = SOUND_ON;
+
+  function getCtx(){
+    if (!audioCtx){
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+  // браузеры разрешают звук только после действия пользователя
+  ['pointerdown', 'touchstart', 'keydown'].forEach(function(ev){
+    document.addEventListener(ev, getCtx, { passive: true });
+  });
+
+  function playRustle(){
+    if (!soundOn) return;
+    var ctx = getCtx();
+    if (!ctx) return;
+
+    var now = ctx.currentTime;
+    var dur = 0.45 + Math.random() * 0.15;           // каждый раз немного разная длина
+    var len = Math.floor(ctx.sampleRate * dur);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++){
+      // «шуршащий» шум с потрескиванием бумаги
+      d[i] = (Math.random() * 2 - 1) * (Math.random() < 0.25 ? 1 : 0.35);
+    }
+
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+
+    var hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 500;
+
+    var bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 0.7;
+    var f = 1100 + Math.random() * 500;
+    bp.frequency.setValueAtTime(f, now);
+    bp.frequency.exponentialRampToValueAtTime(f * 3.2, now + dur * 0.55);
+    bp.frequency.exponentialRampToValueAtTime(f * 1.4, now + dur);
+
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(VOLUME,       now + 0.05);
+    g.gain.exponentialRampToValueAtTime(VOLUME * 0.45, now + dur * 0.45);
+    g.gain.exponentialRampToValueAtTime(VOLUME * 0.9,  now + dur * 0.7);
+    g.gain.exponentialRampToValueAtTime(0.0001,        now + dur);
+
+    src.connect(hp); hp.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    src.start(now);
+    src.stop(now + dur);
+  }
+
+  var soundBtn = document.getElementById('vbook-sound');
+  function updateSoundBtn(){ soundBtn.innerHTML = soundOn ? '&#128266;' : '&#128263;'; }
+  updateSoundBtn();
+  soundBtn.onclick = function(){ soundOn = !soundOn; updateSoundBtn(); };
+  /* ------------------------------------- */
 
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -72,7 +141,7 @@
 
   pdfjsLib.getDocument({
     url: PDF_FILE,
-    disableAutoFetch: true,   // не качать весь файл заранее
+    disableAutoFetch: true,
     disableStream: true
   }).promise.then(async function(pdf){
 
@@ -81,7 +150,6 @@
     var v1 = first.getViewport({ scale: 1 });
     var RATIO = v1.height / v1.width;
 
-    // пустые страницы-заготовки
     var canvases = [];
     for (var i = 0; i < N; i++){
       var div = document.createElement('div');
@@ -93,96 +161,3 @@
     }
 
     var done = {};
-    async function renderPage(idx){
-      var page = await pdf.getPage(idx + 1);
-      var base = page.getViewport({ scale: 1 });
-      var vp = page.getViewport({ scale: RENDER_WIDTH / base.width });
-      var c = canvases[idx];
-      c.width = vp.width;
-      c.height = vp.height;
-      var ctx = c.getContext('2d');
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, c.width, c.height);
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
-      page.cleanup();
-    }
-
-    // очередь отрисовки: сначала открытая страница, потом соседние
-    var queue = [], busy = false;
-    async function run(){
-      if (busy) return;
-      busy = true;
-      while (queue.length){
-        var idx = queue.shift();
-        try { await renderPage(idx); }
-        catch(e){ console.error(e); done[idx] = false; }
-      }
-      busy = false;
-    }
-    function loadAround(idx){
-      queue.forEach(function(q){ done[q] = false; });
-      queue = [];
-      [idx, idx + 1, idx - 1, idx + 2, idx + 3, idx + 4, idx + 5, idx - 2].forEach(function(j){
-        if (j >= 0 && j < N && !done[j]){ done[j] = true; queue.push(j); }
-      });
-      run();
-    }
-
-    // сначала обложка, потом показываем книгу
-    done[0] = true;
-    await renderPage(0);
-
-    var w = 650;
-    var pageFlip = new St.PageFlip(bookEl, {
-      width: w,
-      height: Math.round(w * RATIO),
-      size: 'stretch',
-      minWidth: 280,
-      maxWidth: 1100,
-      minHeight: Math.round(280 * RATIO),
-      maxHeight: Math.round(1100 * RATIO),
-      showCover: true,
-      usePortrait: true,
-      mobileScrollSupport: false,
-      maxShadowOpacity: 0.4,
-      flippingTime: 800
-    });
-    pageFlip.loadFromHTML(document.querySelectorAll('#vbook .vbook-page'));
-
-    loader.style.display = 'none';
-    controls.style.display = 'flex';
-
-    function update(){
-      var idx = pageFlip.getCurrentPageIndex();
-      counter.textContent = (idx + 1) + ' / ' + pageFlip.getPageCount();
-      loadAround(idx);
-    }
-    update();
-    pageFlip.on('flip', update);
-    pageFlip.on('changeOrientation', update);
-
-    document.getElementById('vbook-prev').onclick = function(){ pageFlip.flipPrev(); };
-    document.getElementById('vbook-next').onclick = function(){ pageFlip.flipNext(); };
-
-    document.addEventListener('keydown', function(e){
-      if (e.key === 'ArrowLeft')  pageFlip.flipPrev();
-      if (e.key === 'ArrowRight') pageFlip.flipNext();
-    });
-
-    document.getElementById('vbook-full').onclick = function(){
-      if (!document.fullscreenElement){
-        (wrap.requestFullscreen || wrap.webkitRequestFullscreen).call(wrap);
-      } else {
-        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-      }
-    };
-
-  }).catch(function(err){
-    console.error(err);
-    loader.innerHTML = 'Не удалось открыть файл «' + PDF_FILE +
-      '». Проверьте, что он лежит рядом с index.html и имя совпадает (с учётом регистра).';
-  });
-})();
-</script>
-</body>
-</html>
